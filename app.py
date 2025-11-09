@@ -87,19 +87,18 @@ def get_embedding(text):
 # Retrieve relevant chunks
 # -------------------------------------------------
 def retrieve_chunks(question, chunks, embeddings, top_k=4):
-    """Finds the most relevant text chunks to the question."""
-    if not chunks or embeddings is None:
-        return ""
-
+    # Add contextually rich expansion for methods/framework queries
     synonyms = (
-        "stage step phase framework process methodology method approach design "
-        "Arksey O'Malley Levac scoping review structure workflow outline sequence"
+        "framework model approach method methodology design structure "
+        "Arksey O'Malley Levac scoping review five stage stages "
+        "outline process workflow theory"
     )
     question_aug = question + " " + synonyms
     q_emb = get_embedding(question_aug)
     sims = cosine_similarity([q_emb], embeddings)[0]
     top_idx = np.argsort(sims)[::-1][:top_k]
     return "\n\n---\n\n".join([chunks[i] for i in top_idx])
+
 
 # -------------------------------------------------
 # Ask GPT only from retrieved chunks
