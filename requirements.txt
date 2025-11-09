@@ -1,4 +1,8 @@
 streamlit
-pdfplumber
+pymupdf
 openai
+scikit-learn
 tiktoken
+numpy
+pandas
+pdfplumber
