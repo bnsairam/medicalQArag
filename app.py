@@ -1,10 +1,9 @@
 # ==============================================
-# 💊 MedRAG v3.1 – True RAG for Medical PDFs
+# 💊 MedRAG v3.2 – Verified Retrieval-Augmented Q&A for Medical PDFs
 # ==============================================
-# Features:
-# ✅ PyMuPDF text extraction (better than pdfplumber)
+# ✅ PyMuPDF text extraction
 # ✅ Semantic chunking + embeddings retrieval
-# ✅ Answers ONLY from document, quoted
+# ✅ Quotes exact sentences from document
 # ✅ "Not found in document" fallback
 # ==============================================
 
@@ -16,63 +15,67 @@ import numpy as np
 from openai import OpenAI
 from sklearn.metrics.pairwise import cosine_similarity
 
-# ----------------------------------------------
-# Streamlit Page Setup
-# ----------------------------------------------
+# -------------------------------------------------
+# Streamlit setup
+# -------------------------------------------------
 st.set_page_config(page_title="MedRAG", page_icon="💊", layout="centered")
 st.title("💊 MedRAG – Medical PDF Q&A")
 st.caption("Upload a medical PDF → Ask → Get answers **only from the document.**")
 
-# ----------------------------------------------
-# Check API key
-# ----------------------------------------------
+# -------------------------------------------------
+# Check API Key
+# -------------------------------------------------
 if "OPENROUTER_API_KEY" not in st.secrets:
     st.error("⚠️ Add `OPENROUTER_API_KEY` in `.streamlit/secrets.toml`")
     st.stop()
 
-client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=st.secrets["OPENROUTER_API_KEY"])
+client = OpenAI(base_url="https://openrouter.ai/api/v1",
+                api_key=st.secrets["OPENROUTER_API_KEY"])
 MODEL = "gpt-4o-mini"
 ENCODER = tiktoken.encoding_for_model(MODEL)
 
-# ----------------------------------------------
-# Text Extraction (PyMuPDF)
-# ----------------------------------------------
+# -------------------------------------------------
+# PDF text extraction
+# -------------------------------------------------
 def extract_text(pdf_file):
-    text = ""
+    """Extracts text from uploaded PDF using PyMuPDF."""
     try:
+        text = ""
         with fitz.open(stream=pdf_file.read(), filetype="pdf") as pdf:
             for page in pdf:
                 text += page.get_text("text") + "\n"
-        clean_text = re.sub(r"\s+", " ", text.strip())
-        return clean_text
+        text = re.sub(r"\s+", " ", text.strip())
+        return text
     except Exception as e:
         st.error(f"PDF extraction failed: {e}")
         return ""
 
-# ----------------------------------------------
+# -------------------------------------------------
 # Split text into semantic chunks
-# ----------------------------------------------
+# -------------------------------------------------
 def split_text(text, max_tokens=500):
+    """Splits long text into manageable chunks based on tokens."""
     sentences = re.split(r'(?<=[.!?]) +', text)
     chunks, current, token_count = [], "", 0
 
     for sentence in sentences:
         tokens = len(ENCODER.encode(sentence))
         if token_count + tokens > max_tokens:
-            chunks.append(current.strip())
+            if current.strip():
+                chunks.append(current.strip())
             current, token_count = sentence, tokens
         else:
             current += " " + sentence
             token_count += tokens
     if current.strip():
         chunks.append(current.strip())
-
     return chunks
 
-# ----------------------------------------------
+# -------------------------------------------------
 # Create embeddings
-# ----------------------------------------------
+# -------------------------------------------------
 def get_embedding(text):
+    """Generates embedding for given text using OpenRouter."""
     try:
         emb = client.embeddings.create(model="text-embedding-3-small", input=text)
         return np.array(emb.data[0].embedding)
@@ -80,11 +83,14 @@ def get_embedding(text):
         st.error(f"Embedding error: {e}")
         return np.zeros(1536)
 
-# ----------------------------------------------
+# -------------------------------------------------
 # Retrieve relevant chunks
-# ----------------------------------------------
+# -------------------------------------------------
 def retrieve_chunks(question, chunks, embeddings, top_k=4):
-    # Add contextually rich expansion for methods/framework queries
+    """Finds the most relevant text chunks to the question."""
+    if not chunks or embeddings is None:
+        return ""
+
     synonyms = (
         "stage step phase framework process methodology method approach design "
         "Arksey O'Malley Levac scoping review structure workflow outline sequence"
@@ -95,13 +101,15 @@ def retrieve_chunks(question, chunks, embeddings, top_k=4):
     top_idx = np.argsort(sims)[::-1][:top_k]
     return "\n\n---\n\n".join([chunks[i] for i in top_idx])
 
-
-
-# ----------------------------------------------
+# -------------------------------------------------
 # Ask GPT only from retrieved chunks
-# ----------------------------------------------
+# -------------------------------------------------
 def ask_from_doc(question, chunks, embeddings):
+    """Asks GPT model, restricting answers strictly to document context."""
     context = retrieve_chunks(question, chunks, embeddings)
+    if not context:
+        return "No relevant text found."
+
     try:
         response = client.chat.completions.create(
             model=MODEL,
@@ -110,8 +118,8 @@ def ask_from_doc(question, chunks, embeddings):
                     "role": "system",
                     "content": (
                         "You are a medical research assistant. "
-                        "Answer ONLY from the DOCUMENT provided below. "
-                        "Always quote the exact text in double quotes. "
+                        "Answer ONLY from the DOCUMENT below. "
+                        "Quote exact sentences in double quotes. "
                         "If not found, respond exactly: 'Not found in document.'"
                     ),
                 },
@@ -130,9 +138,9 @@ def ask_from_doc(question, chunks, embeddings):
     except Exception as e:
         return f"⚠️ API Error: {e}"
 
-# ----------------------------------------------
-# Streamlit State Init
-# ----------------------------------------------
+# -------------------------------------------------
+# Streamlit Session Init
+# -------------------------------------------------
 if "chunks" not in st.session_state:
     st.session_state.chunks = []
 if "embeddings" not in st.session_state:
@@ -140,18 +148,20 @@ if "embeddings" not in st.session_state:
 if "pdf_text" not in st.session_state:
     st.session_state.pdf_text = ""
 
-# ----------------------------------------------
-# Upload PDF
-# ----------------------------------------------
+# -------------------------------------------------
+# File Upload
+# -------------------------------------------------
 uploaded = st.file_uploader("📄 Upload a medical PDF", type="pdf")
 
 if uploaded:
-    with st.spinner("Extracting text from PDF..."):
+    with st.spinner("📚 Extracting and processing document..."):
         text = extract_text(uploaded)
         if text:
             st.session_state.pdf_text = text
             st.session_state.chunks = split_text(text)
-            st.session_state.embeddings = np.array([get_embedding(c) for c in st.session_state.chunks])
+            st.session_state.embeddings = np.array(
+                [get_embedding(chunk) for chunk in st.session_state.chunks]
+            )
             st.success(f"✅ Document processed into {len(st.session_state.chunks)} chunks.")
         else:
             st.error("❌ Failed to extract text.")
@@ -160,24 +170,21 @@ else:
     st.info("⬆️ Upload a medical PDF to begin.")
     st.stop()
 
-# ----------------------------------------------
-# Ask a question
-# ----------------------------------------------
-question = st.text_input(
-    "💬 Ask about the document:",
-    placeholder="e.g., What is the title of the paper?",
-)
+# -------------------------------------------------
+# Q&A
+# -------------------------------------------------
+question = st.text_input("💬 Ask about the document:", placeholder="e.g., What is the study design?")
 
 if st.button("🔎 Search Document") and question.strip():
-    with st.spinner("Analyzing document..."):
+    with st.spinner("🔬 Searching and analyzing document..."):
         answer = ask_from_doc(question, st.session_state.chunks, st.session_state.embeddings)
     st.markdown(f"**Answer:** {answer}")
 
-# ----------------------------------------------
-# Debug Search Tool
-# ----------------------------------------------
+# -------------------------------------------------
+# Debug Section – Word Search
+# -------------------------------------------------
 st.markdown("---")
-st.subheader("🔬 Quick Word Search (Debug)")
+st.subheader("🔍 Quick Word Search (Debug)")
 
 search = st.text_input("Find a term in the document:", key="debug")
 if search and st.session_state.pdf_text:
@@ -192,9 +199,9 @@ if search and st.session_state.pdf_text:
     else:
         st.warning(f"'{search}' not found.")
 
-# ----------------------------------------------
+# -------------------------------------------------
 # Download Extracted Text
-# ----------------------------------------------
+# -------------------------------------------------
 if st.session_state.pdf_text:
     st.download_button(
         "⬇️ Download Extracted Text",
@@ -203,4 +210,4 @@ if st.session_state.pdf_text:
         mime="text/plain",
     )
 
-st.caption("🧬 MedRAG v3.1 – Verified Retrieval-Augmented Q&A for Medical PDFs.")
+st.caption("🧬 MedRAG v3.2 – Verified Retrieval-Augmented Q&A for Medical PDFs.")

@@ -1,8 +1,8 @@
 streamlit
 pymupdf
+tiktoken
 openai
 scikit-learn
-tiktoken
 numpy
 pandas
 pdfplumber

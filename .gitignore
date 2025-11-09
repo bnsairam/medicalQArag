@@ -1,0 +1,26 @@
+# ======================================
+# Python & Streamlit Ignore List
+# ======================================
+
+# Virtual environment
+venv/
+.env/
+
+# Streamlit secrets (sensitive)
+.streamlit/secrets.toml
+
+# System files
+__pycache__/
+*.pyc
+.DS_Store
+
+# IDE settings
+.vscode/
+.idea/
+
+# Cache / Logs
+*.log
+*.tmp
+*.bak
+*.swp
+.cache/
