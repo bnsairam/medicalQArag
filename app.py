@@ -1,212 +1,178 @@
-# ==============================================
-# 💊 MedRAG v3.2 – Verified Retrieval-Augmented Q&A for Medical PDFs
-# ==============================================
-# ✅ PyMuPDF text extraction
-# ✅ Semantic chunking + embeddings retrieval
-# ✅ Quotes exact sentences from document
-# ✅ "Not found in document" fallback
-# ==============================================
+# =============================================================
+# 🧠 MedText — Medical Research Paper Summarizer & Q&A
+# =============================================================
+# ▶️ Install dependencies before running:
+# pip install streamlit PyPDF2 openai
 
 import streamlit as st
-import fitz  # PyMuPDF
-import tiktoken
-import re
-import numpy as np
+import PyPDF2
 from openai import OpenAI
-from sklearn.metrics.pairwise import cosine_similarity
+import io
 
-# -------------------------------------------------
-# Streamlit setup
-# -------------------------------------------------
-st.set_page_config(page_title="MedRAG", page_icon="💊", layout="centered")
-st.title("💊 MedRAG – Medical PDF Q&A")
-st.caption("Upload a medical PDF → Ask → Get answers **only from the document.**")
-
-# -------------------------------------------------
-# Check API Key
-# -------------------------------------------------
+# =============================================================
+# 🔐 Load OpenRouter API Key (from Streamlit Secrets)
+# =============================================================
 if "OPENROUTER_API_KEY" not in st.secrets:
-    st.error("⚠️ Add `OPENROUTER_API_KEY` in `.streamlit/secrets.toml`")
+    st.error("❌ API key missing! Please add it under Streamlit → Settings → Secrets as:\n\nOPENROUTER_API_KEY = 'sk-or-v1-xxxxxx'")
     st.stop()
 
-client = OpenAI(base_url="https://openrouter.ai/api/v1",
-                api_key=st.secrets["OPENROUTER_API_KEY"])
+OPENROUTER_API_KEY = st.secrets["OPENROUTER_API_KEY"]
+
+# Initialize OpenRouter client
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=OPENROUTER_API_KEY
+)
+
 MODEL = "gpt-4o-mini"
-ENCODER = tiktoken.encoding_for_model(MODEL)
 
-# -------------------------------------------------
-# PDF text extraction
-# -------------------------------------------------
-def extract_text(pdf_file):
-    """Extracts text from uploaded PDF using PyMuPDF."""
+# =============================================================
+# 📘 Function: Extract text from PDF
+# =============================================================
+def extract_text_from_pdf(uploaded_file):
+    """Extract raw text content from uploaded PDF."""
     try:
+        reader = PyPDF2.PdfReader(uploaded_file)
         text = ""
-        with fitz.open(stream=pdf_file.read(), filetype="pdf") as pdf:
-            for page in pdf:
-                text += page.get_text("text") + "\n"
-        text = re.sub(r"\s+", " ", text.strip())
-        return text
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+        return text.strip(), len(reader.pages)
     except Exception as e:
-        st.error(f"PDF extraction failed: {e}")
-        return ""
+        st.error(f"⚠️ Error extracting text: {e}")
+        return "", 0
 
-# -------------------------------------------------
-# Split text into semantic chunks
-# -------------------------------------------------
-def split_text(text, max_tokens=500):
-    """Splits long text into manageable chunks based on tokens."""
-    sentences = re.split(r'(?<=[.!?]) +', text)
-    chunks, current, token_count = [], "", 0
+# =============================================================
+# 🧠 Function: Summarize Research Paper
+# =============================================================
+def summarize_paper(pdf_text):
+    """Summarize the research paper content."""
+    if not pdf_text:
+        return "❌ No text extracted from PDF."
 
-    for sentence in sentences:
-        tokens = len(ENCODER.encode(sentence))
-        if token_count + tokens > max_tokens:
-            if current.strip():
-                chunks.append(current.strip())
-            current, token_count = sentence, tokens
-        else:
-            current += " " + sentence
-            token_count += tokens
-    if current.strip():
-        chunks.append(current.strip())
-    return chunks
+    prompt = f"""
+You are a **medical research summarizer**.
+Summarize the following research paper strictly using its content.
 
-# -------------------------------------------------
-# Create embeddings
-# -------------------------------------------------
-def get_embedding(text):
-    """Generates embedding for given text using OpenRouter."""
-    try:
-        emb = client.embeddings.create(model="text-embedding-3-small", input=text)
-        return np.array(emb.data[0].embedding)
-    except Exception as e:
-        st.error(f"Embedding error: {e}")
-        return np.zeros(1536)
+If any section is missing in the paper, write "Not clearly mentioned in the document."
 
-# -------------------------------------------------
-# Retrieve relevant chunks
-# -------------------------------------------------
-def retrieve_chunks(question, chunks, embeddings, top_k=4):
-    # Add contextually rich expansion for methods/framework queries
-    synonyms = (
-        "framework model approach method methodology design structure "
-        "Arksey O'Malley Levac scoping review five stage stages "
-        "outline process workflow theory"
-    )
-    question_aug = question + " " + synonyms
-    q_emb = get_embedding(question_aug)
-    sims = cosine_similarity([q_emb], embeddings)[0]
-    top_idx = np.argsort(sims)[::-1][:top_k]
-    return "\n\n---\n\n".join([chunks[i] for i in top_idx])
+📄 **Research Paper:**
+{pdf_text[:12000]}
 
-
-# -------------------------------------------------
-# Ask GPT only from retrieved chunks
-# -------------------------------------------------
-def ask_from_doc(question, chunks, embeddings):
-    """Asks GPT model, restricting answers strictly to document context."""
-    context = retrieve_chunks(question, chunks, embeddings)
-    if not context:
-        return "No relevant text found."
+Provide summary in the format:
+1. 🩺 Title/Topic
+2. 🎯 Objective
+3. ⚗️ Methods
+4. 🔑 Key Findings
+5. 🧾 Conclusion
+"""
 
     try:
-        response = client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You are a medical research assistant. "
-                        "Answer ONLY from the DOCUMENT below. "
-                        "Quote exact sentences in double quotes. "
-                        "If not found, respond exactly: 'Not found in document.'"
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": f"DOCUMENT:\n{context}\n\nQUESTION: {question}\n\nANSWER:",
-                },
-            ],
-            temperature=0,
-            max_tokens=400,
-        )
-        answer = response.choices[0].message.content.strip()
-        if "not found" not in answer.lower() and '"' not in answer:
-            return "Not found in document."
-        return answer
-    except Exception as e:
-        return f"⚠️ API Error: {e}"
-
-# -------------------------------------------------
-# Streamlit Session Init
-# -------------------------------------------------
-if "chunks" not in st.session_state:
-    st.session_state.chunks = []
-if "embeddings" not in st.session_state:
-    st.session_state.embeddings = None
-if "pdf_text" not in st.session_state:
-    st.session_state.pdf_text = ""
-
-# -------------------------------------------------
-# File Upload
-# -------------------------------------------------
-uploaded = st.file_uploader("📄 Upload a medical PDF", type="pdf")
-
-if uploaded:
-    with st.spinner("📚 Extracting and processing document..."):
-        text = extract_text(uploaded)
-        if text:
-            st.session_state.pdf_text = text
-            st.session_state.chunks = split_text(text)
-            st.session_state.embeddings = np.array(
-                [get_embedding(chunk) for chunk in st.session_state.chunks]
+        with st.spinner("🧠 Generating structured summary..."):
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "You are a precise medical paper summarizer. Use only the text from the document."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.2,
+                max_tokens=1000,
             )
-            st.success(f"✅ Document processed into {len(st.session_state.chunks)} chunks.")
-        else:
-            st.error("❌ Failed to extract text.")
-            st.stop()
-else:
-    st.info("⬆️ Upload a medical PDF to begin.")
-    st.stop()
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Error generating summary: {e}"
 
-# -------------------------------------------------
-# Q&A
-# -------------------------------------------------
-question = st.text_input("💬 Ask about the document:", placeholder="e.g., What is the study design?")
+# =============================================================
+# 💬 Function: Answer Questions Strictly from PDF
+# =============================================================
+def answer_from_pdf(pdf_text, question):
+    """Answer questions using only the provided PDF content."""
+    if not pdf_text:
+        return "❌ Please upload a valid PDF first."
 
-if st.button("🔎 Search Document") and question.strip():
-    with st.spinner("🔬 Searching and analyzing document..."):
-        answer = ask_from_doc(question, st.session_state.chunks, st.session_state.embeddings)
-    st.markdown(f"**Answer:** {answer}")
+    if not question.strip():
+        return "⚠️ Please enter a valid question."
 
-# -------------------------------------------------
-# Debug Section – Word Search
-# -------------------------------------------------
-st.markdown("---")
-st.subheader("🔍 Quick Word Search (Debug)")
+    prompt = f"""
+You are a **medical research assistant**.
+Your job is to answer ONLY based on the following research paper text.
+Do NOT use any outside knowledge.
 
-search = st.text_input("Find a term in the document:", key="debug")
-if search and st.session_state.pdf_text:
-    txt = st.session_state.pdf_text.lower()
-    term = search.lower()
-    count = txt.count(term)
-    if count:
-        st.success(f"✅ Found '{search}' {count} time(s).")
-        idx = txt.find(term)
-        snippet = st.session_state.pdf_text[max(0, idx - 100): idx + 200]
-        st.code(snippet.replace(search, f"**{search}**"), language="text")
+If the answer cannot be found or inferred directly from the paper, respond:
+"❌ Not enough information found in the uploaded paper to answer this question."
+
+📄 **Research Paper Content:**
+{pdf_text[:12000]}
+
+💬 **Question:**
+{question}
+
+🧠 **Answer (from the document only):**
+"""
+
+    try:
+        with st.spinner("💭 Searching the document for an answer..."):
+            response = client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": "Answer questions strictly from the PDF content. Never add external facts."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.1,
+                max_tokens=700,
+            )
+        return response.choices[0].message.content.strip()
+    except Exception as e:
+        return f"⚠️ Error generating answer: {e}"
+
+# =============================================================
+# 🎨 Streamlit Interface
+# =============================================================
+st.set_page_config(page_title="🧠 MedText Research Summarizer", layout="wide")
+
+st.title("🧠 MedText — Medical Research Paper Summarizer & Q&A")
+st.caption("Upload a medical research paper (PDF), get a structured summary, and ask domain-specific questions based ONLY on the document. Powered by OpenRouter GPT-4o-mini.")
+
+uploaded_file = st.file_uploader("📄 Upload your research paper (PDF only)", type=["pdf"])
+
+if uploaded_file:
+    st.success(f"✅ Uploaded: `{uploaded_file.name}`")
+
+    pdf_text, total_pages = extract_text_from_pdf(uploaded_file)
+
+    if pdf_text:
+        st.info(f"📘 Extracted content from **{total_pages} pages**.")
+
+        # === Summarize Section ===
+        st.subheader("🔍 Summarize Paper")
+        if st.button("✨ Generate Summary"):
+            summary = summarize_paper(pdf_text)
+            st.markdown("### 📋 Summary")
+            st.write(summary)
+
+            # Download Option
+            if summary and not summary.startswith("⚠️"):
+                summary_bytes = io.BytesIO(summary.encode("utf-8"))
+                st.download_button(
+                    label="⬇️ Download Summary (.txt)",
+                    data=summary_bytes,
+                    file_name="Research_Paper_Summary.txt",
+                    mime="text/plain"
+                )
+
+        st.markdown("---")
+        # === Q&A Section ===
+        st.subheader("💬 Ask a Question About This Paper")
+        question = st.text_input("Enter your question here:")
+        if st.button("🧠 Get Answer from PDF"):
+            answer = answer_from_pdf(pdf_text, question)
+            st.markdown("### ✅ Answer (from PDF)")
+            st.write(answer)
     else:
-        st.warning(f"'{search}' not found.")
+        st.warning("⚠️ Could not extract text. Ensure the PDF is text-based (not scanned image).")
+else:
+    st.info("📤 Upload a medical research paper to begin.")
 
-# -------------------------------------------------
-# Download Extracted Text
-# -------------------------------------------------
-if st.session_state.pdf_text:
-    st.download_button(
-        "⬇️ Download Extracted Text",
-        data=st.session_state.pdf_text.encode(),
-        file_name="extracted_medtext.txt",
-        mime="text/plain",
-    )
-
-st.caption("🧬 MedRAG v3.2 – Verified Retrieval-Augmented Q&A for Medical PDFs.")
+st.markdown("---")
+st.caption("🚀 MedText | AI-Powered Medical Research Summarizer (Context-Locked Mode)")
